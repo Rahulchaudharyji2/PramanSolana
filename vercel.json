@@ -3,6 +3,6 @@
   "framework": "nextjs",
   "buildCommand": "npx turbo run build --filter=@praman-network/web...",
   "outputDirectory": "apps/web/.next",
-  "installCommand": "pnpm install"
+  "installCommand": "pnpm install --no-frozen-lockfile"
 }
 
