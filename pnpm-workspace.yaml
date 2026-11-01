@@ -6,4 +6,10 @@ allowBuilds:
   bufferutil: true
   esbuild: true
   utf-8-validate: true
-  workerd: set this to true or false
+  workerd: true
+
+onlyBuiltDependencies:
+  - bufferutil
+  - esbuild
+  - utf-8-validate
+  - workerd

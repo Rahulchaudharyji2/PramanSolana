@@ -5,3 +5,4 @@
   "outputDirectory": "apps/web/.next",
   "installCommand": "pnpm install"
 }
+
