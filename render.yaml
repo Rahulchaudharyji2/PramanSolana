@@ -1,0 +1,32 @@
+services:
+  # ---------------- 1. PRAMAN BACKEND API RELAYER ----------------
+  - type: web
+    name: praman-api
+    runtime: node
+    plan: free
+    buildCommand: pnpm install && npx turbo run build --filter=@praman-network/api...
+    startCommand: node apps/api/dist/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: SOLANA_RPC_URL
+        value: https://api.devnet.solana.com
+      - key: SOLANA_PROGRAM_ID
+        value: AgWrVQjE96uKhyqK4QJsR3HnkTwbC1fvKFdjuTQNKGCP
+      - key: PRIVY_APP_ID
+        value: cmvwx6cgk01730gich3vctvxk
+      - key: PRIVY_WALLET_CHAIN
+        value: solana
+
+  # ---------------- 2. PRAMAN WEB FRONTEND & DASHBOARD ----------------
+  - type: web
+    name: praman-web
+    runtime: node
+    plan: free
+    buildCommand: pnpm install && npx turbo run build --filter=@praman-network/web...
+    startCommand: pnpm --filter @praman-network/web start -p $PORT
+    envVars:
+      - key: NODE_ENV
+        value: production

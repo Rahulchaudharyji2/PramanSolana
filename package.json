@@ -5,6 +5,10 @@
   "description": "Praman Network - Privacy-Preserving Identity & Authentication Infrastructure",
   "scripts": {
     "build": "turbo run build",
+    "build:web": "turbo run build --filter=@praman-network/web...",
+    "build:api": "turbo run build --filter=@praman-network/api...",
+    "start:web": "pnpm --filter @praman-network/web start",
+    "start:api": "node apps/api/dist/index.js",
     "dev": "turbo run dev",
     "dev:api": "turbo run dev --filter=@praman-network/api",
     "dev:web": "turbo run dev --filter=@praman-network/web",
