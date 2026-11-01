@@ -184,6 +184,12 @@ export class AuthService {
       throw new Error(`BIOMETRIC_NOT_ENROLLED: User '${user.email}' has not completed biometric face enrollment. Please enroll your face first.`);
     }
 
+    // Biometric Mismatch Protection: Reject unauthorized faces
+    if ((params.zkPayload as any).isMismatch || ((params.zkPayload as any).faceDistance && (params.zkPayload as any).faceDistance > 25.0)) {
+      session.status = 'REJECTED';
+      throw new Error('BIOMETRIC_FACE_MISMATCH: Live facial scan does not match the registered identity for this wallet. Authentication blocked for security.');
+    }
+
     // 1. In demo/simulated mode, bind public signals to active session challenge
     if (params.zkPayload.publicSignals && params.zkPayload.publicSignals.length >= 5) {
       if (params.zkPayload.isSimulatedDemoMode) {

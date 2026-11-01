@@ -28,7 +28,14 @@ dotenv.config({ path: '../.env.example' });
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false,
+    crossOriginResourcePolicy: false,
+  })
+);
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -452,6 +459,16 @@ app.post('/api/v1/identity/lookup', (req: Request, res: Response) => {
   });
 });
 
+app.post('/api/v1/identity/:userId/enrolled-vector', (req: Request, res: Response) => {
+  const userId = String(req.params.userId);
+  const { vector } = req.body;
+  if (!vector || !Array.isArray(vector)) {
+    return res.status(400).json({ error: 'vector array is required' });
+  }
+  IdentityService.setEnrolledFaceVector(userId, vector);
+  res.json({ success: true, message: 'Enrolled face vector updated successfully' });
+});
+
 app.post('/api/v1/identity/send-otp', async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
@@ -600,6 +617,7 @@ app.get('/api/v1/auth/authorize', (req: Request, res: Response) => {
     });
 
     // If client requested JSON response (SDK initiation)
+    res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
     if (req.headers.accept?.includes('application/json')) {
       return res.json({ session, portalUrl });
     }

@@ -12,7 +12,12 @@ import {
   ProofRecordSummary,
 } from '@praman-network/types';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { YugabyteService } from './services/yugabyte.service.js';
+
+const PERSISTENCE_DIR = path.resolve(process.cwd(), 'apps/api/data');
+const PERSISTENCE_FILE = path.join(PERSISTENCE_DIR, 'praman_local_db.json');
 
 export interface PramanSessionRecord {
   id: string; // psess_xxxxxxxxx
@@ -55,6 +60,7 @@ class MemoryDatabase {
   public identityTemplates = new Map<string, IdentityTemplateRecord[]>(); // userId -> templates
   public vaultAttributes = new Map<string, EncryptedVaultAttribute[]>(); // userId -> attributes
   public pairwiseIds = new Map<string, string>(); // `${userId}:${projectId}` -> pairwiseId
+  public enrolledFaceVectors = new Map<string, number[]>(); // userId -> 128D facial feature vector
   public consentRecords = new Map<string, ConsentRecord>();
   public authRequests = new Map<string, AuthRequestSession & { authCode?: string }>();
   public authSessions = new Map<string, PramanSessionRecord>();
@@ -86,10 +92,108 @@ class MemoryDatabase {
 
   constructor() {
     this.seedDemoData();
+    this.loadFromDisk();
+    this.seedRahulChaudharyUser();
     // Attempt asynchronous YugabyteDB schema initialization if cluster is reachable
     setImmediate(() => {
       YugabyteService.initializeSchema().catch(() => {});
     });
+  }
+
+  public loadFromDisk() {
+    try {
+      if (fs.existsSync(PERSISTENCE_FILE)) {
+        const raw = fs.readFileSync(PERSISTENCE_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        if (data.users && Array.isArray(data.users)) {
+          for (const u of data.users) this.users.set(u.id, u);
+        }
+        if (data.commitments && Array.isArray(data.commitments)) {
+          for (const c of data.commitments) this.commitments.set(c.userId, c);
+        }
+        if (data.identityTemplates && Array.isArray(data.identityTemplates)) {
+          for (const [userId, templates] of data.identityTemplates) {
+            this.identityTemplates.set(userId, templates);
+          }
+        }
+        if (data.vaultAttributes && Array.isArray(data.vaultAttributes)) {
+          for (const [userId, attrs] of data.vaultAttributes) {
+            this.vaultAttributes.set(userId, attrs);
+          }
+        }
+        if (data.pairwiseIds && Array.isArray(data.pairwiseIds)) {
+          for (const [key, val] of data.pairwiseIds) {
+            this.pairwiseIds.set(key, val);
+          }
+        }
+        if (data.enrolledFaceVectors && Array.isArray(data.enrolledFaceVectors)) {
+          for (const [key, val] of data.enrolledFaceVectors) {
+            this.enrolledFaceVectors.set(key, val);
+          }
+        }
+        console.log(`💾 [Praman Storage] Loaded ${this.users.size} persisted user(s) from disk.`);
+      }
+    } catch (err: any) {
+      console.warn('Could not load local database from disk:', err?.message || err);
+    }
+  }
+
+  public persistToDisk() {
+    try {
+      if (!fs.existsSync(PERSISTENCE_DIR)) {
+        fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
+      }
+      const data = {
+        users: Array.from(this.users.values()),
+        commitments: Array.from(this.commitments.values()),
+        identityTemplates: Array.from(this.identityTemplates.entries()),
+        vaultAttributes: Array.from(this.vaultAttributes.entries()),
+        pairwiseIds: Array.from(this.pairwiseIds.entries()),
+        enrolledFaceVectors: Array.from(this.enrolledFaceVectors.entries()),
+      };
+      fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err: any) {
+      console.warn('Could not persist local database to disk:', err?.message || err);
+    }
+  }
+
+  private seedRahulChaudharyUser() {
+    const defaultEmail = 'rahulchaudharyji2@gmail.com';
+    const existing = Array.from(this.users.values()).find(u => u.email.toLowerCase() === defaultEmail);
+    if (!existing) {
+      const defaultUserId = 'usr_rahul_chaudhary_01';
+      const defaultCommitmentHash = '0x16b088b7762ea98c7d81a91dcf1f6f1c4e7a83d920436d4f7c1126938cb46011';
+      const defaultSaltHex = '0x9923847291aebf102839213847291aeb';
+      const defaultSolanaWallet = '8HmvLhXvgTS5AUD4XJohSs92tSnpr9xRoJ5NYGvhPrfJ';
+      const defaultSolanaTx = '494MGp7bVL9F4Jc4WnXHQ92Z9AacF31VXMKrkTB7yhgtNo89TT9oGXiNyo58P3FFGhTuygi3Acq1VYhEYqJU9Pyh';
+
+      this.users.set(defaultUserId, {
+        id: defaultUserId,
+        internalRootId: 'root_rahul_chaudhary_dev',
+        email: defaultEmail,
+        fullName: 'Rahul Chaudhary',
+        emailVerified: true,
+        phone: '+91 98765 43210',
+        solanaWalletAddress: defaultSolanaWallet,
+        privyUserId: 'did:privy:cm0prm_rahul_default',
+        status: 'ENROLLED',
+        createdAt: '2026-10-31T12:00:00.000Z',
+        updatedAt: new Date().toISOString(),
+      });
+
+      this.commitments.set(defaultUserId, {
+        id: 'cmt_rahul_chaudhary_01',
+        userId: defaultUserId,
+        commitmentHash: defaultCommitmentHash,
+        saltHex: defaultSaltHex,
+        algorithm: 'POSEIDON_BN254',
+        version: 1,
+        active: true,
+        solanaTxSignature: defaultSolanaTx,
+        createdAt: '2026-10-31T12:00:00.000Z',
+      });
+      this.persistToDisk();
+    }
   }
 
   private seedDemoData() {

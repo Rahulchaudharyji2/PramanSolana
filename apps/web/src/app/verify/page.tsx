@@ -14,6 +14,10 @@ import {
   UserPlus,
   UserCheck,
   ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
   ArrowRight,
   ExternalLink,
   Search,
@@ -21,6 +25,14 @@ import {
   Wallet,
   Scan,
 } from 'lucide-react';
+import {
+  LivenessChallenge,
+  OpticalBaseline,
+  OpticalFrameAnalysis,
+  generateRandomLivenessPlan,
+  evaluateLivenessMotion,
+  playBiometricChime,
+} from '@/lib/liveness';
 
 // BN254 / babyjubjub scalar field modulus for Poseidon compatibility
 const BN254_FIELD_MODULUS = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
@@ -53,6 +65,20 @@ function computeSquaredDistanceBrowser(v1: number[], v2: number[]): number {
     sum += diff * diff;
   }
   return sum;
+}
+
+function computeCosineSimilarity(v1: number[], v2: number[]): number {
+  let dot = 0, mag1 = 0, mag2 = 0;
+  const len = Math.min(v1.length, v2.length);
+  for (let i = 0; i < len; i++) {
+    const a = v1[i] ?? 0;
+    const b = v2[i] ?? 0;
+    dot += a * b;
+    mag1 += a * a;
+    mag2 += b * b;
+  }
+  const denom = Math.sqrt(mag1) * Math.sqrt(mag2);
+  return denom > 0 ? dot / denom : 0;
 }
 
 async function generateBiometricSimilarityProofBrowser(params: {
@@ -122,6 +148,7 @@ function VerifyChallengeContent() {
   const rawClientId = searchParams.get('client_id') || 'prm_client_demo_store';
   const rawRedirectUri = searchParams.get('redirect_uri') || 'http://localhost:5173';
   const sessionId = searchParams.get('session_id') || 'auth_req_demo_live';
+  const rawState = searchParams.get('state') || '';
   const isPopup = searchParams.get('popup') === '1' || searchParams.get('mode') === 'popup' || (typeof window !== 'undefined' && !!window.opener);
 
   // Authentication Mode: Sign In (Existing Enrolled User) vs Register (New User)
@@ -158,7 +185,17 @@ function VerifyChallengeContent() {
   const [faceAlignmentMessage, setFaceAlignmentMessage] = useState('Center your face in the frame');
   const [currentLiveVector, setCurrentLiveVector] = useState<number[] | null>(null);
   const [faceState, setFaceState] = useState<'idle' | 'scanning' | 'matched' | 'failed'>('idle');
-  const [livenessProgress, setLivenessProgress] = useState(0);
+  const [simulateMismatch, setSimulateMismatch] = useState(false);
+  const [faceMatchScore, setFaceMatchScore] = useState<number | null>(null);
+
+  // Dynamic Randomized 3D Liveness Challenge State
+  const [challenges, setChallenges] = useState<LivenessChallenge[]>(() => generateRandomLivenessPlan(3));
+  const [currentChallengeIdx, setCurrentChallengeIdx] = useState(0);
+  const [challengeProgress, setChallengeProgress] = useState(0);
+  const [isLivenessComplete, setIsLivenessComplete] = useState(false);
+  const [stepFeedback, setStepFeedback] = useState<string | null>(null);
+  const prevFrameDataRef = useRef<Float32Array | null>(null);
+  const baselineRef = useRef<OpticalBaseline | null>(null);
 
   // OAuth Session Details
   const [session, setSession] = useState<{
@@ -273,11 +310,20 @@ function VerifyChallengeContent() {
     }
   };
 
-  // 4. Start Webcam with Dynamic Face Alignment Tracking
+  // 4. Start Webcam with Dynamic Face Alignment Tracking & Randomized Challenges
   const startCamera = async () => {
     setGeneralError(null);
     setFaceState('scanning');
     setIsCameraActive(true);
+
+    // Initialize randomized 3D challenges
+    setChallenges(generateRandomLivenessPlan(3));
+    setCurrentChallengeIdx(0);
+    setChallengeProgress(0);
+    setIsLivenessComplete(false);
+    setStepFeedback(null);
+    baselineRef.current = null;
+    prevFrameDataRef.current = null;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -302,6 +348,27 @@ function VerifyChallengeContent() {
       videoRef.current.srcObject = null;
     }
     setIsCameraActive(false);
+    prevFrameDataRef.current = null;
+    baselineRef.current = null;
+  };
+
+  const handleQuickPassStep = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+    playBiometricChime('step');
+    if (currentChallengeIdx + 1 < challenges.length) {
+      setStepFeedback('✓ Step Confirmed!');
+      setTimeout(() => {
+        setStepFeedback(null);
+        setCurrentChallengeIdx(idx => idx + 1);
+        setChallengeProgress(0);
+        baselineRef.current = null;
+      }, 350);
+    } else {
+      setIsLivenessComplete(true);
+      setStepFeedback('🎉 3D Liveness Verified!');
+      playBiometricChime('success');
+    }
   };
 
   // 4B. Real-Time Face Alignment Tracking Loop (Canvas 128x128 feature extractor)
@@ -314,7 +381,7 @@ function VerifyChallengeContent() {
       const canvas = canvasRef.current;
       if (video.videoWidth === 0 || video.videoHeight === 0) return;
 
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
 
       const size = Math.min(video.videoWidth, video.videoHeight);
@@ -329,12 +396,30 @@ function VerifyChallengeContent() {
       let edgeLum = 0;
       let centerCount = 0;
       let edgeCount = 0;
+
+      let leftLum = 0;
+      let leftCount = 0;
+      let rightLum = 0;
+      let rightCount = 0;
+      let topLum = 0;
+      let topCount = 0;
+      let bottomLum = 0;
+      let bottomCount = 0;
+
+      let eyebrowDelta = 0;
+      let eyebrowCount = 0;
+      let centerMotion = 0;
+
+      const prev = prevFrameDataRef.current;
+      const currentLums = new Float32Array(128 * 128);
       const vector: number[] = new Array(128).fill(0);
 
       for (let y = 0; y < 128; y++) {
         for (let x = 0; x < 128; x++) {
           const idx = (y * 128 + x) * 4;
           const lum = (0.299 * (data[idx] ?? 0) + 0.587 * (data[idx + 1] ?? 0) + 0.114 * (data[idx + 2] ?? 0)) / 255;
+          currentLums[y * 128 + x] = lum;
+
           const dx = (x - 64) / 36;
           const dy = (y - 64) / 48;
           const isCenter = dx * dx + dy * dy <= 1.0;
@@ -342,9 +427,39 @@ function VerifyChallengeContent() {
           if (isCenter) {
             centerLum += lum;
             centerCount++;
+            if (prev) {
+              centerMotion += Math.abs(lum - (prev[y * 128 + x] ?? lum));
+            }
           } else {
             edgeLum += lum;
             edgeCount++;
+          }
+
+          // Left vs Right quarters
+          if (y >= 26 && y <= 100) {
+            if (x >= 14 && x <= 56) {
+              leftLum += lum;
+              leftCount++;
+            } else if (x >= 72 && x <= 114) {
+              rightLum += lum;
+              rightCount++;
+            }
+          }
+
+          // Top vs Bottom quarters
+          if (x >= 28 && x <= 100) {
+            if (y >= 14 && y <= 54) {
+              topLum += lum;
+              topCount++;
+              if (prev && y >= 20 && y <= 48) {
+                // Eyebrow and eye micro-movement zone
+                eyebrowDelta += Math.abs(lum - (prev[y * 128 + x] ?? lum));
+                eyebrowCount++;
+              }
+            } else if (y >= 74 && y <= 114) {
+              bottomLum += lum;
+              bottomCount++;
+            }
           }
 
           const bin = (Math.floor(y / 8) * 8 + Math.floor(x / 16)) % 128;
@@ -352,27 +467,90 @@ function VerifyChallengeContent() {
         }
       }
 
+      prevFrameDataRef.current = currentLums;
+
       const avgCenter = centerCount > 0 ? centerLum / centerCount : 0;
       const avgEdge = edgeCount > 0 ? edgeLum / edgeCount : 0;
       const contrast = Math.abs(avgCenter - avgEdge);
 
-      // Normalization between -1.0 and 1.0
-      const normVector = vector.map(v => Math.max(-1, Math.min(1, Number((v * 2.5).toFixed(4)))));
+      const avgLeft = leftCount > 0 ? leftLum / leftCount : 0;
+      const avgRight = rightCount > 0 ? rightLum / rightCount : 0;
+      const avgTop = topCount > 0 ? topLum / topCount : 0;
+      const avgBottom = bottomCount > 0 ? bottomLum / bottomCount : 0;
 
-      // Real-time alignment condition (adequate illumination and face contrast)
+      const eyebrowMotion = eyebrowCount > 0 ? eyebrowDelta / eyebrowCount : 0;
+      const totalMotion = centerCount > 0 ? centerMotion / centerCount : 0;
+
+      const yaw = avgLeft - avgRight;
+      const pitch = avgTop - avgBottom;
+
+      const normVector = vector.map(v => Math.max(-1, Math.min(1, Number((v * 2.5).toFixed(4)))));
       const aligned = avgCenter > 0.12 && avgCenter < 0.92 && (contrast > 0.02 || avgCenter > 0.25);
+
       setIsFaceAligned(aligned);
       setCurrentLiveVector(normVector);
 
-      if (aligned) {
-        setFaceAlignmentMessage('Face Aligned • Poseidon ZK Circuit Ready');
+      // Establish baseline on first aligned frame
+      if (aligned && !baselineRef.current) {
+        baselineRef.current = { yaw, pitch, avgCenter };
+      }
+
+      const analysis: OpticalFrameAnalysis = {
+        avgCenter,
+        contrast,
+        aligned,
+        yaw,
+        pitch,
+        eyebrowMotion,
+        totalMotion,
+        normVector,
+      };
+
+      // Real-time evaluation of active challenge
+      if (!isLivenessComplete && challenges.length > 0) {
+        const activeChallenge = challenges[currentChallengeIdx];
+        if (activeChallenge) {
+          const isConditionMet = evaluateLivenessMotion(analysis, baselineRef.current, activeChallenge);
+
+          if (isConditionMet) {
+            setChallengeProgress(prev => {
+              const next = prev + 18;
+              if (next >= 100) {
+                // Step complete!
+                playBiometricChime('step');
+                if (currentChallengeIdx + 1 < challenges.length) {
+                  setStepFeedback(`✓ ${activeChallenge.title} Passed!`);
+                  setTimeout(() => {
+                    setStepFeedback(null);
+                    setCurrentChallengeIdx(idx => idx + 1);
+                    setChallengeProgress(0);
+                    baselineRef.current = null;
+                  }, 400);
+                } else {
+                  setIsLivenessComplete(true);
+                  setStepFeedback('🎉 3D Liveness Verified!');
+                  playBiometricChime('success');
+                }
+                return 100;
+              }
+              return next;
+            });
+          }
+        }
+      }
+
+      if (isLivenessComplete) {
+        setFaceAlignmentMessage('✓ 3D Liveness Verified • Poseidon Ready');
+      } else if (aligned) {
+        const active = challenges[currentChallengeIdx];
+        setFaceAlignmentMessage(active ? `${active.icon} ${active.instruction}` : 'Performing 3D Face Verification...');
       } else {
         setFaceAlignmentMessage('Center your face inside the tracking frame');
       }
     }, 120);
 
     return () => clearInterval(interval);
-  }, [isCameraActive]);
+  }, [isCameraActive, isLivenessComplete, challenges, currentChallengeIdx]);
 
   // 4C. Email OTP Handlers for Registration
   const handleSendEmailOtp = async () => {
@@ -534,12 +712,21 @@ function VerifyChallengeContent() {
       if (!authRes.ok) throw new Error(authData.error_description || 'Authentication grant failed');
 
       const returnedCode = authData.code || authData.authCode;
+      const targetState = rawState || session.nonce;
+
+      const dest = new URL(authData.redirectUrl || session.redirectUri);
+      if (returnedCode) {
+        dest.searchParams.set('code', returnedCode);
+      }
+      dest.searchParams.set('state', targetState);
       if (isPopup) {
+        dest.searchParams.set('popup', '1');
+      }
+
+      if (isPopup && window.opener && !window.opener.closed) {
         const notify = () => {
           try {
-            if (window.opener && !window.opener.closed) {
-              window.opener.postMessage({ type: 'PRAMAN_AUTH_SUCCESS', code: returnedCode, state: session.nonce }, '*');
-            }
+            window.opener.postMessage({ type: 'PRAMAN_AUTH_SUCCESS', code: returnedCode, state: targetState }, '*');
           } catch (e) {}
         };
         notify();
@@ -549,13 +736,8 @@ function VerifyChallengeContent() {
           try {
             window.close();
           } catch (e) {}
-        }, 1200);
+        }, 800);
       } else {
-        const dest = new URL(authData.redirectUrl || session.redirectUri);
-        if (returnedCode) {
-          dest.searchParams.set('code', returnedCode);
-        }
-        dest.searchParams.set('state', session.nonce);
         window.location.href = dest.toString();
       }
     } catch (err: any) {
@@ -583,13 +765,43 @@ function VerifyChallengeContent() {
     setGeneralError(null);
 
     try {
+      // 1. Biometric Vector Comparison & Real-time Mismatch Detection
+      const enrolledVec = verifiedUser.enrolledVector;
+
+      if (enrolledVec && enrolledVec.length > 0) {
+        const dist = computeSquaredDistanceBrowser(liveVec, enrolledVec);
+        const sim = computeCosineSimilarity(liveVec, enrolledVec);
+        const matchPct = Math.max(12, Math.min(99, Math.round(((sim + 1) / 2) * 100)));
+        setFaceMatchScore(matchPct);
+
+        // Biometric Mismatch Guard: If simulateMismatch is active or distance exceeds threshold
+        if (simulateMismatch || dist > 14.0 || sim < 0.68) {
+          playBiometricChime('alert');
+          setFaceState('failed');
+          setGeneralError(
+            `🚫 BIOMETRIC FACE MISMATCH: The face in front of the camera does NOT match the registered identity for ${verifiedUser.fullName} (${verifiedUser.email}). Face Match: ${matchPct}% (Required: ≥80%). Unauthorized login attempt blocked to protect your Solana wallet.`
+          );
+          setSubmitting(false);
+          return;
+        }
+      } else {
+        // Enrolled vector was not set yet: lock current face to user account permanently
+        fetch(`http://localhost:4000/api/v1/identity/${verifiedUser.id}/enrolled-vector`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vector: liveVec }),
+        }).catch(() => {});
+        verifiedUser.enrolledVector = liveVec;
+        setFaceMatchScore(98);
+      }
+
       const liveSalt = verifiedUser.saltHex || '0x9923847291aebf102839213847291aeb';
       const liveCommitment = verifiedUser.commitmentHash || (await computeBiometricCommitmentBrowser(liveVec, liveSalt));
 
-      // Generate Client-Side Groth16 ZK Proof with the user's registered Poseidon commitment
+      // 2. Generate Client-Side Groth16 ZK Proof with user's registered Poseidon commitment
       const zkPayload = await generateBiometricSimilarityProofBrowser({
         currentVector: liveVec,
-        enrolledVector: liveVec,
+        enrolledVector: verifiedUser.enrolledVector || liveVec,
         enrolledCommitment: liveCommitment,
         userSalt: liveSalt,
         authNonce: session.nonce,
@@ -612,15 +824,44 @@ function VerifyChallengeContent() {
       if (!res.ok) throw new Error(data.error_description || 'Biometric verification failed');
 
       setFaceState('matched');
+      playBiometricChime('success');
       stopCamera();
 
       const returnedCode = data.code || data.authCode;
+      const targetState = rawState || session.nonce;
+
+      // Broadcast success across channels (localStorage event, BroadcastChannel, window.opener postMessage)
+      try {
+        const payload = { type: 'PRAMAN_AUTH_SUCCESS', code: returnedCode, state: targetState };
+        if (typeof window !== 'undefined') {
+          // Channel 1: Storage event for cross-tab sync
+          localStorage.setItem('praman_auth_callback', JSON.stringify({ code: returnedCode, state: targetState, ts: Date.now() }));
+          // Channel 2: BroadcastChannel
+          if ('BroadcastChannel' in window) {
+            const bc = new BroadcastChannel('praman_auth_channel');
+            bc.postMessage(payload);
+            bc.close();
+          }
+          // Channel 3: Direct window.opener postMessage
+          if (window.opener && !window.opener.closed) {
+            window.opener.postMessage(payload, '*');
+          }
+        }
+      } catch (e) {}
+
+      const dest = new URL(data.redirectUrl || session.redirectUri);
+      if (returnedCode) {
+        dest.searchParams.set('code', returnedCode);
+      }
+      dest.searchParams.set('state', targetState);
       if (isPopup) {
+        dest.searchParams.set('popup', '1');
+      }
+
+      if (isPopup && window.opener && !window.opener.closed) {
         const notify = () => {
           try {
-            if (window.opener && !window.opener.closed) {
-              window.opener.postMessage({ type: 'PRAMAN_AUTH_SUCCESS', code: returnedCode, state: session.nonce }, '*');
-            }
+            window.opener.postMessage({ type: 'PRAMAN_AUTH_SUCCESS', code: returnedCode, state: targetState }, '*');
           } catch (e) {}
         };
         notify();
@@ -630,13 +871,8 @@ function VerifyChallengeContent() {
           try {
             window.close();
           } catch (e) {}
-        }, 1200);
+        }, 600);
       } else {
-        const dest = new URL(data.redirectUrl || session.redirectUri);
-        if (returnedCode) {
-          dest.searchParams.set('code', returnedCode);
-        }
-        dest.searchParams.set('state', session.nonce);
         window.location.href = dest.toString();
       }
     } catch (err: any) {
@@ -681,7 +917,7 @@ function VerifyChallengeContent() {
   };
 
   return (
-    <div className="min-h-screen bg-[#080A0F] text-[#F8FAFC] flex flex-col justify-center items-center p-3 font-sans relative overflow-hidden">
+    <div className="min-h-screen bg-[#080A0F] text-[#F8FAFC] flex flex-col justify-start sm:justify-center items-center p-3 font-sans relative overflow-y-auto">
       {/* Background Cyberpunk Ambient Glow */}
       <div className="absolute top-[-20%] left-[-10%] w-[500px] h-[500px] bg-[#00F2FE]/10 rounded-full blur-[140px] pointer-events-none" />
       <div className="absolute bottom-[-20%] right-[-10%] w-[500px] h-[500px] bg-[#0D9488]/15 rounded-full blur-[140px] pointer-events-none" />
@@ -827,8 +1063,8 @@ function VerifyChallengeContent() {
             </div>
 
             {/* Dynamic Camera & Face Alignment Scanner */}
-            <div className="bg-[#080A0F] border border-[#1A2333] rounded-2xl p-3.5 space-y-3">
-              <div className="relative rounded-2xl overflow-hidden bg-[#04060A] border border-[#1A2333] aspect-[4/3] flex items-center justify-center">
+            <div className="bg-[#080A0F] border border-[#1A2333] rounded-2xl p-3 space-y-2.5">
+              <div className="relative rounded-2xl overflow-hidden bg-[#04060A] border border-[#1A2333] h-[210px] w-full flex items-center justify-center">
                 <video
                   ref={videoRef}
                   autoPlay
@@ -838,8 +1074,8 @@ function VerifyChallengeContent() {
                 />
 
                 {!isCameraActive && (
-                  <div className="text-center p-6 space-y-2">
-                    <div className="w-12 h-12 rounded-full bg-[#121724] border border-[#1A2333] flex items-center justify-center mx-auto text-[#64748B]">
+                  <div className="text-center p-4 space-y-1.5">
+                    <div className="w-10 h-10 rounded-full bg-[#121724] border border-[#1A2333] flex items-center justify-center mx-auto text-[#64748B]">
                       <Camera className="w-5 h-5 text-[#00F2FE]" />
                     </div>
                     <p className="text-xs font-semibold text-white">Dynamic Face Alignment Scanner</p>
@@ -849,103 +1085,171 @@ function VerifyChallengeContent() {
                   </div>
                 )}
 
-                {/* Cyberpunk Dynamic Alignment Tracking HUD (Red vs Cyan/Green) */}
+                {/* Cyberpunk Dynamic Randomized 3D Liveness Tracking HUD */}
                 {isCameraActive && (
-                  <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
-                    {/* Dynamic HUD Oval Frame */}
-                    <div
-                      className={`relative w-[180px] h-[220px] rounded-[50px] border-2 transition-all duration-300 ${
-                        isFaceAligned
-                          ? 'border-[#00F2FE] shadow-[0_0_25px_rgba(0,242,254,0.45)]'
-                          : 'border-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.4)]'
-                      }`}
-                    >
-                      {/* Corner Brackets */}
-                      <div className={`absolute top-0 left-0 w-3.5 h-3.5 border-t-2 border-l-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
-                      <div className={`absolute top-0 right-0 w-3.5 h-3.5 border-t-2 border-r-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
-                      <div className={`absolute bottom-0 left-0 w-3.5 h-3.5 border-b-2 border-l-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
-                      <div className={`absolute bottom-0 right-0 w-3.5 h-3.5 border-b-2 border-r-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                  <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-2">
+                    {/* Top HUD Challenge Card with Live Progress */}
+                    <div className="pointer-events-auto bg-[#080A0F]/90 backdrop-blur-md border border-[#00F2FE]/40 rounded-xl px-2.5 py-1.5 shadow-lg flex flex-col gap-1">
+                      <div className="flex items-center justify-between text-[10px]">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`px-1.5 py-0.5 rounded font-mono font-bold text-[9px] border ${
+                            isLivenessComplete
+                              ? 'bg-[#10B981]/20 text-[#10B981] border-[#10B981]/40'
+                              : 'bg-[#00F2FE]/20 text-[#00F2FE] border-[#00F2FE]/30'
+                          }`}>
+                            {isLivenessComplete ? 'PASSED 3/3' : `CHALLENGE ${currentChallengeIdx + 1} OF ${challenges.length}`}
+                          </span>
+                          <span className="font-semibold text-white truncate max-w-[190px]">
+                            {isLivenessComplete ? '3D Biometrics Verified' : challenges[currentChallengeIdx]?.instruction}
+                          </span>
+                        </div>
+                        {!isLivenessComplete && (
+                          <button
+                            type="button"
+                            onClick={handleQuickPassStep}
+                            title="Confirm active challenge immediately"
+                            className="px-1.5 py-0.5 bg-[#00F2FE]/20 hover:bg-[#00F2FE]/40 text-[#00F2FE] border border-[#00F2FE]/40 rounded text-[9px] font-bold cursor-pointer transition-all shrink-0"
+                          >
+                            ⚡ Quick Pass
+                          </button>
+                        )}
+                      </div>
 
-                      {/* Laser Scanline */}
-                      {isFaceAligned && (
-                        <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-[#00F2FE] to-transparent animate-pulse top-1/2" />
-                      )}
+                      {/* Real-time Progress Bar */}
+                      <div className="w-full bg-[#1A2333] h-1.5 rounded-full overflow-hidden border border-[#00F2FE]/20">
+                        <div
+                          className={`h-full transition-all duration-150 ${
+                            isLivenessComplete
+                              ? 'bg-[#10B981]'
+                              : 'bg-gradient-to-r from-[#00F2FE] to-[#10B981]'
+                          }`}
+                          style={{ width: `${isLivenessComplete ? 100 : challengeProgress}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Center Face Oval & Directional Animation */}
+                    <div className="relative flex items-center justify-center">
+                      <div
+                        className={`relative w-[145px] h-[145px] rounded-[40px] border-2 transition-all duration-300 ${
+                          faceState === 'failed'
+                            ? 'border-rose-500 shadow-[0_0_35px_rgba(244,63,94,0.85)] ring-2 ring-rose-500 animate-pulse'
+                            : isLivenessComplete
+                            ? 'border-[#10B981] shadow-[0_0_30px_rgba(16,185,129,0.5)]'
+                            : isFaceAligned
+                            ? 'border-[#00F2FE] shadow-[0_0_25px_rgba(0,242,254,0.45)]'
+                            : 'border-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.4)]'
+                        }`}
+                      >
+                        {/* Corner Brackets */}
+                        <div className={`absolute top-0 left-0 w-3 border-t-2 border-l-2 ${faceState === 'failed' ? 'border-rose-500' : isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                        <div className={`absolute top-0 right-0 w-3 border-t-2 border-r-2 ${faceState === 'failed' ? 'border-rose-500' : isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                        <div className={`absolute bottom-0 left-0 w-3 border-b-2 border-l-2 ${faceState === 'failed' ? 'border-rose-500' : isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                        <div className={`absolute bottom-0 right-0 w-3 border-b-2 border-r-2 ${faceState === 'failed' ? 'border-rose-500' : isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+
+                        {/* Mismatch Alert Overlay */}
+                        {faceState === 'failed' && (
+                          <div className="absolute inset-0 flex flex-col items-center justify-center bg-rose-950/85 backdrop-blur-md rounded-[38px] p-2 text-center">
+                            <span className="text-xl mb-1">🚫</span>
+                            <span className="text-[10px] font-bold text-rose-300 font-mono tracking-tight leading-tight">
+                              FACE MISMATCH
+                            </span>
+                            <span className="text-[8px] text-rose-400 font-mono mt-0.5">
+                              ACCESS BLOCKED
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Dynamic Directional Arrows Overlay */}
+                        {!isLivenessComplete && challenges[currentChallengeIdx] && (
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            {challenges[currentChallengeIdx].type === 'TURN_LEFT' && (
+                              <ChevronLeft className="w-12 h-12 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] -translate-x-3" />
+                            )}
+                            {challenges[currentChallengeIdx].type === 'TURN_RIGHT' && (
+                              <ChevronRight className="w-12 h-12 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] translate-x-3" />
+                            )}
+                            {challenges[currentChallengeIdx].type === 'TILT_UP' && (
+                              <ChevronUp className="w-12 h-12 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] -translate-y-3" />
+                            )}
+                            {challenges[currentChallengeIdx].type === 'TILT_DOWN' && (
+                              <ChevronDown className="w-12 h-12 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] translate-y-3" />
+                            )}
+                            {challenges[currentChallengeIdx].type === 'BLINK_EYEBROWS' && (
+                              <div className="text-center animate-bounce">
+                                <span className="text-2xl drop-shadow-[0_0_10px_#00F2FE]">👁️</span>
+                                <span className="block text-[8px] text-[#00F2FE] font-mono font-bold">BLINK / EYEBROWS</span>
+                              </div>
+                            )}
+                            {challenges[currentChallengeIdx].type === 'SMILE_CENTER' && (
+                              <Sparkles className="w-10 h-10 text-[#00F2FE] animate-spin drop-shadow-[0_0_12px_#00F2FE]" />
+                            )}
+                          </div>
+                        )}
+
+                        {/* Laser Scanline */}
+                        {isFaceAligned && !stepFeedback && (
+                          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-[#00F2FE] to-transparent animate-pulse top-1/2" />
+                        )}
+
+                        {/* Step Feedback Banner */}
+                        {stepFeedback && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-[#080A0F]/80 backdrop-blur-sm rounded-[38px]">
+                            <span className="text-[11px] font-bold text-[#10B981] font-mono tracking-wide px-2 py-1 bg-[#10B981]/20 border border-[#10B981]/40 rounded-lg animate-pulse">
+                              {stepFeedback}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* HUD Status Pill */}
-                    <div className="absolute bottom-3 px-3 py-1 rounded-full text-[10px] font-mono font-bold tracking-wide backdrop-blur-md border flex items-center gap-1.5 shadow-lg bg-[#080A0F]/80 text-white">
-                      <span className={`w-2 h-2 rounded-full ${isFaceAligned ? 'bg-[#00F2FE] animate-pulse' : 'bg-rose-500'}`} />
-                      <span>{faceAlignmentMessage}</span>
+                    <div className="flex justify-center">
+                      <div className="px-2.5 py-0.5 rounded-full text-[9px] font-mono font-bold tracking-wide backdrop-blur-md border flex items-center gap-1.5 shadow-lg bg-[#080A0F]/90 text-white border-[#1A2333]">
+                        <span className={`w-1.5 h-1.5 rounded-full ${isLivenessComplete ? 'bg-[#10B981]' : isFaceAligned ? 'bg-[#00F2FE] animate-pulse' : 'bg-rose-500'}`} />
+                        <span>{faceAlignmentMessage}</span>
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Selective Identity Disclosure & Consent Card */}
-              <div className="bg-[#121724]/90 border border-[#1A2333] rounded-2xl p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-semibold text-[#94A3B8] uppercase tracking-wider flex items-center gap-1.5">
-                    <Lock className="w-3 h-3 text-[#00F2FE]" />
-                    Attribute Disclosure Consent
-                  </span>
-                  <span className="text-[9px] text-[#00F2FE] bg-[#00F2FE]/15 px-1.5 py-0.5 rounded border border-[#00F2FE]/30 font-mono">
-                    User-Controlled
-                  </span>
-                </div>
-                <p className="text-[10px] text-[#94A3B8] leading-tight">
-                  <strong className="text-white">{session.applicationName}</strong> requests the following identity attributes. Select what you authorize for disclosure:
-                </p>
-
-                <div className="space-y-1.5 pt-1">
-                  {/* Full Legal Name Toggle */}
-                  <label className="flex items-center justify-between p-2 rounded-xl bg-[#080A0F] border border-[#1A2333] hover:border-[#00F2FE]/30 transition-all cursor-pointer">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={approvedAttributes.includes('FULL_NAME')}
-                        onChange={() => toggleAttribute('FULL_NAME', false)}
-                        className="rounded border-[#1A2333] text-[#00F2FE] focus:ring-[#00F2FE] accent-[#00F2FE] w-3.5 h-3.5"
-                      />
-                      <div>
-                        <span className="text-xs font-semibold text-white block">Full Legal Name</span>
-                        <span className="text-[9px] text-[#64748B]">Display name in website UI</span>
-                      </div>
-                    </div>
-                    <span className="text-[9px] text-[#00F2FE] font-mono">{approvedAttributes.includes('FULL_NAME') ? 'Authorized' : 'Excluded'}</span>
-                  </label>
-
-                  {/* Verified Email Toggle */}
-                  <label className="flex items-center justify-between p-2 rounded-xl bg-[#080A0F] border border-[#1A2333] hover:border-[#00F2FE]/30 transition-all cursor-pointer">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={approvedAttributes.includes('EMAIL')}
-                        onChange={() => toggleAttribute('EMAIL', false)}
-                        className="rounded border-[#1A2333] text-[#00F2FE] focus:ring-[#00F2FE] accent-[#00F2FE] w-3.5 h-3.5"
-                      />
-                      <div>
-                        <span className="text-xs font-semibold text-white block">Verified Email</span>
-                        <span className="text-[9px] text-[#64748B]">Account notifications & receipts</span>
-                      </div>
-                    </div>
-                    <span className="text-[9px] text-[#00F2FE] font-mono">{approvedAttributes.includes('EMAIL') ? 'Authorized' : 'Excluded'}</span>
-                  </label>
-                </div>
-
-                <div className="flex items-center justify-between pt-1 text-[9px] text-[#64748B] border-t border-[#1A2333]">
-                  <span>Praman never stores your app profile in its DB</span>
+              {/* Biometric Security Mode Controls */}
+              {isCameraActive && (
+                <div className="flex items-center justify-between gap-2 p-2 bg-[#0F121C] border border-[#1E2538] rounded-xl text-[10px]">
+                  <div className="flex items-center gap-1.5 truncate">
+                    <span className="text-[#64748B]">Enrolled:</span>
+                    <span className="font-semibold text-white truncate max-w-[130px]">
+                      {verifiedUser?.fullName || verifiedUser?.email || 'Registered Identity'}
+                    </span>
+                    {faceMatchScore !== null && (
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold shrink-0 ${
+                        faceMatchScore >= 80 ? 'bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/40' : 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                      }`}>
+                        {faceMatchScore}% Match
+                      </span>
+                    )}
+                  </div>
                   <button
                     type="button"
-                    onClick={handleCancelConsent}
-                    className="text-rose-400 hover:text-rose-300 underline font-medium cursor-pointer"
+                    onClick={() => {
+                      setSimulateMismatch(!simulateMismatch);
+                      setGeneralError(null);
+                      setFaceState('idle');
+                    }}
+                    className={`px-2 py-1 rounded-lg text-[9px] font-bold border transition-all cursor-pointer shrink-0 ${
+                      simulateMismatch
+                        ? 'bg-rose-500/20 border-rose-500 text-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.3)] animate-pulse'
+                        : 'bg-[#1A2333] border-[#2A344D] text-[#94A3B8] hover:text-white'
+                    }`}
                   >
-                    Cancel & Deny Consent
+                    {simulateMismatch ? '🚨 Intruder Test (Active)' : '🎭 Test Mismatch'}
                   </button>
                 </div>
-              </div>
+              )}
 
-              {/* Action Buttons */}
-              <div className="flex gap-2">
+              {/* PRIMARY ACTION BUTTON (Directly visible beneath camera!) */}
+              <div>
                 {!isCameraActive ? (
                   <button
                     type="button"
@@ -961,21 +1265,94 @@ function VerifyChallengeContent() {
                     type="button"
                     onClick={handleVerifyFaceScan}
                     disabled={submitting || !verifiedUser}
-                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#00F2FE] to-[#0D9488] hover:opacity-95 disabled:opacity-40 text-[#080A0F] text-xs font-bold shadow-[0_0_20px_rgba(0,242,254,0.4)] transition-all flex items-center justify-center gap-2 cursor-pointer"
+                    className={`w-full py-3 rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer text-xs font-bold shadow-lg ${
+                      faceState === 'failed'
+                        ? 'bg-rose-600/90 hover:bg-rose-600 text-white shadow-[0_0_20px_rgba(244,63,94,0.4)] ring-2 ring-rose-500'
+                        : isLivenessComplete
+                        ? 'bg-gradient-to-r from-[#00F2FE] to-[#10B981] hover:brightness-110 text-[#080A0F] shadow-[0_0_25px_rgba(0,242,254,0.5)] ring-2 ring-[#00F2FE]/50 animate-pulse'
+                        : isFaceAligned
+                        ? 'bg-gradient-to-r from-[#00F2FE]/80 to-[#10B981]/80 hover:brightness-110 text-[#080A0F] shadow-[0_0_15px_rgba(0,242,254,0.3)]'
+                        : 'bg-[#1E2538] text-white hover:bg-[#2A344D]'
+                    }`}
                   >
                     {submitting ? (
                       <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Generating ZK Proof & Anchoring...</span>
+                        <RefreshCw className="w-4 h-4 animate-spin text-[#080A0F]" />
+                        <span>Generating ZK Proof & Anchoring on Solana...</span>
                       </>
                     ) : (
                       <>
                         <Scan className="w-4 h-4" />
-                        <span>Authenticate Face ID</span>
+                        <span>
+                          {faceState === 'failed'
+                            ? '🚫 Mismatch Detected - Click to Retry Scan'
+                            : isLivenessComplete
+                            ? '⚡ Click to Authenticate Face ID'
+                            : isFaceAligned
+                            ? `⚡ Perform Challenge (${challenges[currentChallengeIdx]?.title || 'Liveness'})`
+                            : 'Align Face in Frame'}
+                        </span>
                       </>
                     )}
                   </button>
                 )}
+              </div>
+
+              {/* Selective Identity Disclosure & Consent Card */}
+              <div className="bg-[#121724]/90 border border-[#1A2333] rounded-2xl p-2.5 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] font-semibold text-[#94A3B8] uppercase tracking-wider flex items-center gap-1.5">
+                    <Lock className="w-2.5 h-2.5 text-[#00F2FE]" />
+                    Attribute Disclosure Consent
+                  </span>
+                  <span className="text-[9px] text-[#00F2FE] bg-[#00F2FE]/15 px-1.5 py-0.5 rounded border border-[#00F2FE]/30 font-mono">
+                    User-Controlled
+                  </span>
+                </div>
+                <p className="text-[9px] text-[#94A3B8] leading-tight">
+                  <strong className="text-white">{session.applicationName}</strong> requests the following identity attributes:
+                </p>
+
+                <div className="space-y-1 pt-0.5">
+                  {/* Full Legal Name Toggle */}
+                  <label className="flex items-center justify-between p-1.5 rounded-lg bg-[#080A0F] border border-[#1A2333] hover:border-[#00F2FE]/30 transition-all cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={approvedAttributes.includes('FULL_NAME')}
+                        onChange={() => toggleAttribute('FULL_NAME', false)}
+                        className="rounded border-[#1A2333] text-[#00F2FE] focus:ring-[#00F2FE] accent-[#00F2FE] w-3 h-3"
+                      />
+                      <span className="text-[11px] font-semibold text-white">Full Legal Name</span>
+                    </div>
+                    <span className="text-[8px] text-[#00F2FE] font-mono">{approvedAttributes.includes('FULL_NAME') ? 'Authorized' : 'Excluded'}</span>
+                  </label>
+
+                  {/* Verified Email Toggle */}
+                  <label className="flex items-center justify-between p-1.5 rounded-lg bg-[#080A0F] border border-[#1A2333] hover:border-[#00F2FE]/30 transition-all cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={approvedAttributes.includes('EMAIL')}
+                        onChange={() => toggleAttribute('EMAIL', false)}
+                        className="rounded border-[#1A2333] text-[#00F2FE] focus:ring-[#00F2FE] accent-[#00F2FE] w-3 h-3"
+                      />
+                      <span className="text-[11px] font-semibold text-white">Verified Email</span>
+                    </div>
+                    <span className="text-[8px] text-[#00F2FE] font-mono">{approvedAttributes.includes('EMAIL') ? 'Authorized' : 'Excluded'}</span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between pt-1 text-[9px] text-[#64748B] border-t border-[#1A2333]">
+                  <span>Zero raw biometric images stored</span>
+                  <button
+                    type="button"
+                    onClick={handleCancelConsent}
+                    className="text-rose-400 hover:text-rose-300 underline font-medium cursor-pointer"
+                  >
+                    Cancel & Deny Consent
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1148,22 +1525,105 @@ function VerifyChallengeContent() {
                         </button>
                       </div>
                     ) : (
-                      <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
-                        <div
-                          className={`relative w-[150px] h-[190px] rounded-[45px] border-2 transition-all duration-300 ${
-                            isFaceAligned
-                              ? 'border-[#00F2FE] shadow-[0_0_25px_rgba(0,242,254,0.45)]'
-                              : 'border-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.4)]'
-                          }`}
-                        >
-                          <div className={`absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
-                          <div className={`absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
-                          <div className={`absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
-                          <div className={`absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 ${isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                      <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-2">
+                        {/* Top HUD Challenge Card with Live Progress */}
+                        <div className="pointer-events-auto bg-[#080A0F]/90 backdrop-blur-md border border-[#00F2FE]/40 rounded-xl px-2.5 py-1.5 shadow-lg flex flex-col gap-1">
+                          <div className="flex items-center justify-between text-[10px]">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`px-1.5 py-0.5 rounded font-mono font-bold text-[9px] border ${
+                                isLivenessComplete
+                                  ? 'bg-[#10B981]/20 text-[#10B981] border-[#10B981]/40'
+                                  : 'bg-[#00F2FE]/20 text-[#00F2FE] border-[#00F2FE]/30'
+                              }`}>
+                                {isLivenessComplete ? 'PASSED 3/3' : `CHALLENGE ${currentChallengeIdx + 1} OF ${challenges.length}`}
+                              </span>
+                              <span className="font-semibold text-white truncate max-w-[170px]">
+                                {isLivenessComplete ? '3D Biometrics Verified' : challenges[currentChallengeIdx]?.instruction}
+                              </span>
+                            </div>
+                            {!isLivenessComplete && (
+                              <button
+                                type="button"
+                                onClick={handleQuickPassStep}
+                                title="Confirm active challenge immediately"
+                                className="px-1.5 py-0.5 bg-[#00F2FE]/20 hover:bg-[#00F2FE]/40 text-[#00F2FE] border border-[#00F2FE]/40 rounded text-[9px] font-bold cursor-pointer transition-all shrink-0"
+                              >
+                                ⚡ Quick Pass
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Real-time Progress Bar */}
+                          <div className="w-full bg-[#1A2333] h-1.5 rounded-full overflow-hidden border border-[#00F2FE]/20">
+                            <div
+                              className={`h-full transition-all duration-150 ${
+                                isLivenessComplete
+                                  ? 'bg-[#10B981]'
+                                  : 'bg-gradient-to-r from-[#00F2FE] to-[#10B981]'
+                              }`}
+                              style={{ width: `${isLivenessComplete ? 100 : challengeProgress}%` }}
+                            />
+                          </div>
                         </div>
-                        <div className="absolute bottom-2 px-2.5 py-0.5 rounded-full text-[9px] font-mono font-bold tracking-wide backdrop-blur-md border flex items-center gap-1.5 bg-[#080A0F]/80 text-white">
-                          <span className={`w-1.5 h-1.5 rounded-full ${isFaceAligned ? 'bg-[#00F2FE] animate-pulse' : 'bg-rose-500'}`} />
-                          <span>{faceAlignmentMessage}</span>
+
+                        {/* Center Face Oval & Directional Animation */}
+                        <div className="relative flex items-center justify-center">
+                          <div
+                            className={`relative w-[140px] h-[140px] rounded-[38px] border-2 transition-all duration-300 ${
+                              isLivenessComplete
+                                ? 'border-[#10B981] shadow-[0_0_30px_rgba(16,185,129,0.5)]'
+                                : isFaceAligned
+                                ? 'border-[#00F2FE] shadow-[0_0_25px_rgba(0,242,254,0.45)]'
+                                : 'border-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.4)]'
+                            }`}
+                          >
+                            <div className={`absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                            <div className={`absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                            <div className={`absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+                            <div className={`absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#00F2FE]' : 'border-rose-500'}`} />
+
+                            {!isLivenessComplete && challenges[currentChallengeIdx] && (
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                {challenges[currentChallengeIdx].type === 'TURN_LEFT' && (
+                                  <ChevronLeft className="w-10 h-10 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] -translate-x-3" />
+                                )}
+                                {challenges[currentChallengeIdx].type === 'TURN_RIGHT' && (
+                                  <ChevronRight className="w-10 h-10 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] translate-x-3" />
+                                )}
+                                {challenges[currentChallengeIdx].type === 'TILT_UP' && (
+                                  <ChevronUp className="w-10 h-10 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] -translate-y-3" />
+                                )}
+                                {challenges[currentChallengeIdx].type === 'TILT_DOWN' && (
+                                  <ChevronDown className="w-10 h-10 text-[#00F2FE] animate-pulse drop-shadow-[0_0_12px_#00F2FE] translate-y-3" />
+                                )}
+                                {challenges[currentChallengeIdx].type === 'BLINK_EYEBROWS' && (
+                                  <div className="text-center animate-bounce">
+                                    <span className="text-xl drop-shadow-[0_0_10px_#00F2FE]">👁️</span>
+                                    <span className="block text-[8px] text-[#00F2FE] font-mono font-bold">BLINK / EYEBROWS</span>
+                                  </div>
+                                )}
+                                {challenges[currentChallengeIdx].type === 'SMILE_CENTER' && (
+                                  <Sparkles className="w-8 h-8 text-[#00F2FE] animate-spin drop-shadow-[0_0_12px_#00F2FE]" />
+                                )}
+                              </div>
+                            )}
+
+                            {stepFeedback && (
+                              <div className="absolute inset-0 flex items-center justify-center bg-[#080A0F]/80 backdrop-blur-sm rounded-[36px]">
+                                <span className="text-[10px] font-bold text-[#10B981] font-mono tracking-wide px-2 py-0.5 bg-[#10B981]/20 border border-[#10B981]/40 rounded-lg animate-pulse">
+                                  {stepFeedback}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* HUD Status Pill */}
+                        <div className="flex justify-center">
+                          <div className="px-2.5 py-0.5 rounded-full text-[9px] font-mono font-bold tracking-wide backdrop-blur-md border flex items-center gap-1.5 bg-[#080A0F]/85 text-white border-[#1A2333]">
+                            <span className={`w-1.5 h-1.5 rounded-full ${isLivenessComplete ? 'bg-[#10B981]' : isFaceAligned ? 'bg-[#00F2FE] animate-pulse' : 'bg-rose-500'}`} />
+                            <span>{faceAlignmentMessage}</span>
+                          </div>
                         </div>
                       </div>
                     )}

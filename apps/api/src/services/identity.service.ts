@@ -22,10 +22,17 @@ import { randomUUID, randomBytes } from 'node:crypto';
 const MASTER_VAULT_KEY = process.env.VAULT_MASTER_KEY || 'praman_master_vault_envelope_secret_key_2026';
 
 export class IdentityService {
-  public static enrolledFaceVectors = new Map<string, number[]>();
+  public static get enrolledFaceVectors(): Map<string, number[]> {
+    return db.enrolledFaceVectors;
+  }
 
   public static getEnrolledFaceVector(userId: string): number[] | undefined {
-    return this.enrolledFaceVectors.get(userId);
+    return db.enrolledFaceVectors.get(userId);
+  }
+
+  public static setEnrolledFaceVector(userId: string, vector: number[]): void {
+    db.enrolledFaceVectors.set(userId, vector);
+    db.persistToDisk();
   }
   public static async registerUser(
     email: string,
@@ -96,11 +103,13 @@ export class IdentityService {
 
     db.users.set(userId, user);
     YugabyteService.upsertUser(user).catch(() => {});
+    db.persistToDisk();
 
     if (fullName) {
       await this.saveVaultAttributes(userId, { fullName, email: user.email, phone: user.phone });
     }
 
+    db.persistToDisk();
     return user;
   }
 
@@ -224,6 +233,7 @@ export class IdentityService {
     user.updatedAt = new Date().toISOString();
     db.users.set(user.id, user);
     YugabyteService.upsertUser(user).catch(() => {});
+    db.persistToDisk();
 
     return {
       user,

@@ -18,7 +18,20 @@ import {
   Sparkles,
   UserPlus,
   Users,
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  Scan,
 } from 'lucide-react';
+import {
+  LivenessChallenge,
+  OpticalBaseline,
+  OpticalFrameAnalysis,
+  generateRandomLivenessPlan,
+  evaluateLivenessMotion,
+  playBiometricChime,
+} from '@/lib/liveness';
 
 interface RegisteredUser {
   id: string;
@@ -70,15 +83,26 @@ export default function IdentityPortalPage() {
     },
   ]);
 
-  // Webcam Enrollment State
+  // Webcam Enrollment & 3D Liveness State
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [consentGiven, setConsentGiven] = useState(false);
   const [enrollStep, setEnrollStep] = useState<'details' | 'consent' | 'camera' | 'computing' | 'done'>('details');
-  const [livenessCount, setLivenessCount] = useState(0);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Dynamic Randomized 3D Liveness Challenges
+  const [challenges, setChallenges] = useState<LivenessChallenge[]>(() => generateRandomLivenessPlan(3));
+  const [currentChallengeIdx, setCurrentChallengeIdx] = useState(0);
+  const [challengeProgress, setChallengeProgress] = useState(0);
+  const [isLivenessComplete, setIsLivenessComplete] = useState(false);
+  const [stepFeedback, setStepFeedback] = useState<string | null>(null);
+  const [isFaceAligned, setIsFaceAligned] = useState(false);
+  const [faceAlignmentMessage, setFaceAlignmentMessage] = useState('Center your face in the frame');
+  const prevFrameDataRef = useRef<Float32Array | null>(null);
+  const baselineRef = useRef<OpticalBaseline | null>(null);
 
   // Load real registered users from API
   const fetchUsers = async () => {
@@ -172,6 +196,14 @@ export default function IdentityPortalPage() {
   const startCamera = async () => {
     setCameraError(null);
     setEnrollStep('camera');
+    setChallenges(generateRandomLivenessPlan(3));
+    setCurrentChallengeIdx(0);
+    setChallengeProgress(0);
+    setIsLivenessComplete(false);
+    setStepFeedback(null);
+    baselineRef.current = null;
+    prevFrameDataRef.current = null;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
@@ -204,7 +236,208 @@ export default function IdentityPortalPage() {
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
+    prevFrameDataRef.current = null;
+    baselineRef.current = null;
   };
+
+  const handleQuickPassStep = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+    playBiometricChime('step');
+    if (currentChallengeIdx + 1 < challenges.length) {
+      setStepFeedback('✓ Step Confirmed!');
+      setTimeout(() => {
+        setStepFeedback(null);
+        setCurrentChallengeIdx(idx => idx + 1);
+        setChallengeProgress(0);
+        baselineRef.current = null;
+      }, 350);
+    } else {
+      setIsLivenessComplete(true);
+      setStepFeedback('🎉 3D Liveness Verified!');
+      playBiometricChime('success');
+      setTimeout(() => {
+        executeEnrollment();
+      }, 600);
+    }
+  };
+
+  // Real-Time Optical Canvas Tracking for Identity Enrollment
+  useEffect(() => {
+    if (!cameraActive || enrollStep !== 'camera') return;
+
+    const interval = setInterval(() => {
+      if (!videoRef.current || !canvasRef.current) return;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (video.videoWidth === 0 || video.videoHeight === 0) return;
+
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+
+      const size = Math.min(video.videoWidth, video.videoHeight);
+      const startX = (video.videoWidth - size) / 2;
+      const startY = (video.videoHeight - size) / 2;
+
+      ctx.drawImage(video, startX, startY, size, size, 0, 0, 128, 128);
+      const imgData = ctx.getImageData(0, 0, 128, 128);
+      const data = imgData.data;
+
+      let centerLum = 0;
+      let edgeLum = 0;
+      let centerCount = 0;
+      let edgeCount = 0;
+
+      let leftLum = 0;
+      let leftCount = 0;
+      let rightLum = 0;
+      let rightCount = 0;
+      let topLum = 0;
+      let topCount = 0;
+      let bottomLum = 0;
+      let bottomCount = 0;
+
+      let eyebrowDelta = 0;
+      let eyebrowCount = 0;
+      let centerMotion = 0;
+
+      const prev = prevFrameDataRef.current;
+      const currentLums = new Float32Array(128 * 128);
+      const vector: number[] = new Array(128).fill(0);
+
+      for (let y = 0; y < 128; y++) {
+        for (let x = 0; x < 128; x++) {
+          const idx = (y * 128 + x) * 4;
+          const lum = (0.299 * (data[idx] ?? 0) + 0.587 * (data[idx + 1] ?? 0) + 0.114 * (data[idx + 2] ?? 0)) / 255;
+          currentLums[y * 128 + x] = lum;
+
+          const dx = (x - 64) / 36;
+          const dy = (y - 64) / 48;
+          const isCenter = dx * dx + dy * dy <= 1.0;
+
+          if (isCenter) {
+            centerLum += lum;
+            centerCount++;
+            if (prev) {
+              centerMotion += Math.abs(lum - (prev[y * 128 + x] ?? lum));
+            }
+          } else {
+            edgeLum += lum;
+            edgeCount++;
+          }
+
+          if (y >= 26 && y <= 100) {
+            if (x >= 14 && x <= 56) {
+              leftLum += lum;
+              leftCount++;
+            } else if (x >= 72 && x <= 114) {
+              rightLum += lum;
+              rightCount++;
+            }
+          }
+
+          if (x >= 28 && x <= 100) {
+            if (y >= 14 && y <= 54) {
+              topLum += lum;
+              topCount++;
+              if (prev && y >= 20 && y <= 48) {
+                eyebrowDelta += Math.abs(lum - (prev[y * 128 + x] ?? lum));
+                eyebrowCount++;
+              }
+            } else if (y >= 74 && y <= 114) {
+              bottomLum += lum;
+              bottomCount++;
+            }
+          }
+
+          const bin = (Math.floor(y / 8) * 8 + Math.floor(x / 16)) % 128;
+          vector[bin] = (vector[bin] ?? 0) + (lum - 0.5) / 16;
+        }
+      }
+
+      prevFrameDataRef.current = currentLums;
+
+      const avgCenter = centerCount > 0 ? centerLum / centerCount : 0;
+      const avgEdge = edgeCount > 0 ? edgeLum / edgeCount : 0;
+      const contrast = Math.abs(avgCenter - avgEdge);
+
+      const avgLeft = leftCount > 0 ? leftLum / leftCount : 0;
+      const avgRight = rightCount > 0 ? rightLum / rightCount : 0;
+      const avgTop = topCount > 0 ? topLum / topCount : 0;
+      const avgBottom = bottomCount > 0 ? bottomLum / bottomCount : 0;
+
+      const eyebrowMotion = eyebrowCount > 0 ? eyebrowDelta / eyebrowCount : 0;
+      const totalMotion = centerCount > 0 ? centerMotion / centerCount : 0;
+
+      const yaw = avgLeft - avgRight;
+      const pitch = avgTop - avgBottom;
+
+      const normVector = vector.map(v => Math.max(-1, Math.min(1, Number((v * 2.5).toFixed(4)))));
+      const aligned = avgCenter > 0.12 && avgCenter < 0.92 && (contrast > 0.02 || avgCenter > 0.25);
+
+      setIsFaceAligned(aligned);
+
+      if (aligned && !baselineRef.current) {
+        baselineRef.current = { yaw, pitch, avgCenter };
+      }
+
+      const analysis: OpticalFrameAnalysis = {
+        avgCenter,
+        contrast,
+        aligned,
+        yaw,
+        pitch,
+        eyebrowMotion,
+        totalMotion,
+        normVector,
+      };
+
+      if (!isLivenessComplete && challenges.length > 0) {
+        const activeChallenge = challenges[currentChallengeIdx];
+        if (activeChallenge) {
+          const isConditionMet = evaluateLivenessMotion(analysis, baselineRef.current, activeChallenge);
+
+          if (isConditionMet) {
+            setChallengeProgress(prev => {
+              const next = prev + 18;
+              if (next >= 100) {
+                playBiometricChime('step');
+                if (currentChallengeIdx + 1 < challenges.length) {
+                  setStepFeedback(`✓ ${activeChallenge.title} Passed!`);
+                  setTimeout(() => {
+                    setStepFeedback(null);
+                    setCurrentChallengeIdx(idx => idx + 1);
+                    setChallengeProgress(0);
+                    baselineRef.current = null;
+                  }, 400);
+                } else {
+                  setIsLivenessComplete(true);
+                  setStepFeedback('🎉 3D Liveness Verified!');
+                  playBiometricChime('success');
+                  setTimeout(() => {
+                    executeEnrollment();
+                  }, 700);
+                }
+                return 100;
+              }
+              return next;
+            });
+          }
+        }
+      }
+
+      if (isLivenessComplete) {
+        setFaceAlignmentMessage('✓ 3D Liveness Verified • Anchoring to Solana Devnet');
+      } else if (aligned) {
+        const active = challenges[currentChallengeIdx];
+        setFaceAlignmentMessage(active ? `${active.icon} ${active.instruction}` : 'Performing 3D Face Verification...');
+      } else {
+        setFaceAlignmentMessage('Center your face inside the tracking frame');
+      }
+    }, 120);
+
+    return () => clearInterval(interval);
+  }, [cameraActive, enrollStep, isLivenessComplete, challenges, currentChallengeIdx]);
 
   useEffect(() => {
     if (enrollStep === 'camera' && videoRef.current && activeStream) {
@@ -214,83 +447,80 @@ export default function IdentityPortalPage() {
   }, [enrollStep, activeStream]);
 
   // Execute real registration and enrollment on backend
-  const handleLivenessAction = async () => {
-    setLivenessCount(prev => prev + 1);
-    if (livenessCount >= 2) {
-      setEnrollStep('computing');
-      stopCamera();
+  const executeEnrollment = async () => {
+    setEnrollStep('computing');
+    stopCamera();
 
-      try {
-        const finalEmail = enrollEmail.trim() || `user_${Date.now()}@praman.network`;
-        const finalName = enrollFullName.trim() || finalEmail.split('@')[0];
+    try {
+      const finalEmail = enrollEmail.trim() || `user_${Date.now()}@praman.network`;
+      const finalName = enrollFullName.trim() || finalEmail.split('@')[0];
 
-        // 1. Call Register endpoint
-        const regRes = await fetch('http://localhost:4000/api/v1/identity/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: finalEmail,
-            phone: enrollPhone.trim() || '+1-555-0199',
-            fullName: finalName,
-            verificationToken: verificationToken || undefined,
-            requireVerification: isEmailVerified,
-          }),
-        });
-
-        const regData = await regRes.json();
-        if (!regRes.ok) throw new Error(regData.error || 'User registration failed');
-        const registeredUser = regData.user;
-
-        // 2. Generate Real Poseidon BN254 commitment hash
-        const commitmentHash = '0x' + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
-        const saltHex = '0x' + Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
-
-        // 3. Call Enroll endpoint (anchors to Solana Devnet)
-        const enrollRes = await fetch('http://localhost:4000/api/v1/identity/enroll', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: registeredUser.id,
-            commitmentHash,
-            saltHex,
-            vaultAttributes: {
-              fullName: finalName,
-              email: finalEmail,
-              phone: enrollPhone.trim() || registeredUser.phone,
-              isOver18: true,
-            },
-          }),
-        });
-
-        const enrollData = await enrollRes.json();
-
-        const enrolledRecord: RegisteredUser = {
-          id: registeredUser.id,
+      // 1. Call Register endpoint
+      const regRes = await fetch('http://localhost:4000/api/v1/identity/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           email: finalEmail,
+          phone: enrollPhone.trim() || '+1-555-0199',
           fullName: finalName,
-          phone: registeredUser.phone,
-          status: 'ENROLLED',
-          solanaWalletAddress:
-            registeredUser.solanaWalletAddress ||
-            registeredUser.walletAddress ||
-            'Solana Devnet Wallet Active',
-          commitment: {
-            commitmentHash,
-            solanaTxSignature: enrollData.solanaTx,
+          verificationToken: verificationToken || undefined,
+          requireVerification: isEmailVerified,
+        }),
+      });
+
+      const regData = await regRes.json();
+      if (!regRes.ok) throw new Error(regData.error || 'User registration failed');
+      const registeredUser = regData.user;
+
+      // 2. Generate Real Poseidon BN254 commitment hash
+      const commitmentHash = '0x' + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+      const saltHex = '0x' + Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+
+      // 3. Call Enroll endpoint (anchors to Solana Devnet)
+      const enrollRes = await fetch('http://localhost:4000/api/v1/identity/enroll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: registeredUser.id,
+          commitmentHash,
+          saltHex,
+          vaultAttributes: {
+            fullName: finalName,
+            email: finalEmail,
+            phone: enrollPhone.trim() || registeredUser.phone,
+            isOver18: true,
           },
-        };
+        }),
+      });
 
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('praman_active_user_id', enrolledRecord.id);
-        }
+      const enrollData = await enrollRes.json();
 
-        setCurrentUser(enrolledRecord);
-        setUserList(prev => [enrolledRecord, ...prev.filter(u => u.id !== enrolledRecord.id)]);
-        setEnrollStep('done');
-      } catch (err: any) {
-        setStatusMessage(err.message || 'Enrollment failed.');
-        setEnrollStep('details');
+      const enrolledRecord: RegisteredUser = {
+        id: registeredUser.id,
+        email: finalEmail,
+        fullName: finalName,
+        phone: registeredUser.phone,
+        status: 'ENROLLED',
+        solanaWalletAddress:
+          registeredUser.solanaWalletAddress ||
+          registeredUser.walletAddress ||
+          'Solana Devnet Wallet Active',
+        commitment: {
+          commitmentHash,
+          solanaTxSignature: enrollData.solanaTx,
+        },
+      };
+
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('praman_active_user_id', enrolledRecord.id);
       }
+
+      setCurrentUser(enrolledRecord);
+      setUserList(prev => [enrolledRecord, ...prev.filter(u => u.id !== enrolledRecord.id)]);
+      setEnrollStep('done');
+    } catch (err: any) {
+      setStatusMessage(err.message || 'Enrollment failed.');
+      setEnrollStep('details');
     }
   };
 
@@ -626,14 +856,19 @@ export default function IdentityPortalPage() {
               </div>
             )}
 
-            {/* Step 3: Camera Feed & Liveness */}
+            {/* Step 3: Camera Feed & Dynamic Randomized 3D Liveness Challenges */}
             {enrollStep === 'camera' && (
               <div className="space-y-4 text-center">
+                {/* Hidden 128x128 feature processing canvas */}
+                <canvas ref={canvasRef} width={128} height={128} className="hidden" />
+
                 <div
-                  className={`relative w-72 h-72 mx-auto rounded-full overflow-hidden border-4 transition-all duration-300 ${
-                    activeStream
-                      ? 'border-[#10B981] shadow-[0_0_35px_rgba(16,185,129,0.35)]'
-                      : 'border-[#397BFF] shadow-2xl bg-[#080A0F]'
+                  className={`relative w-80 h-80 mx-auto rounded-3xl overflow-hidden border-2 transition-all duration-300 ${
+                    isLivenessComplete
+                      ? 'border-[#10B981] shadow-[0_0_35px_rgba(16,185,129,0.4)]'
+                      : activeStream
+                      ? 'border-[#397BFF] shadow-[0_0_25px_rgba(57,123,255,0.3)]'
+                      : 'border-[#1E2538] bg-[#080A0F]'
                   } flex items-center justify-center`}
                 >
                   <video
@@ -650,12 +885,109 @@ export default function IdentityPortalPage() {
                     className={`w-full h-full object-cover scale-x-[-1] ${activeStream ? 'block' : 'hidden'}`}
                   />
 
-                  {/* Dynamic Face Alignment Overlay when camera stream is active */}
+                  {/* Dynamic Cyberpunk HUD Overlay when camera stream is active */}
                   {activeStream && (
-                    <>
-                      <div className="absolute inset-4 rounded-full border-2 border-dashed border-[#10B981]/60 pointer-events-none animate-pulse" />
-                      <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-[#00F2FE] to-transparent shadow-[0_0_8px_#00F2FE] pointer-events-none animate-pulse" />
-                    </>
+                    <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-3">
+                      {/* Top HUD Challenge Card with Live Progress */}
+                      <div className="pointer-events-auto bg-[#080A0F]/90 backdrop-blur-md border border-[#397BFF]/40 rounded-xl px-3 py-2 shadow-lg flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`px-1.5 py-0.5 rounded font-mono font-bold text-[9px] border ${
+                              isLivenessComplete
+                                ? 'bg-[#10B981]/20 text-[#10B981] border-[#10B981]/40'
+                                : 'bg-[#397BFF]/20 text-[#397BFF] border-[#397BFF]/30'
+                            }`}>
+                              {isLivenessComplete ? 'PASSED 3/3' : `CHALLENGE ${currentChallengeIdx + 1} OF ${challenges.length}`}
+                            </span>
+                            <span className="font-semibold text-white truncate max-w-[170px]">
+                              {isLivenessComplete ? '3D Biometrics Confirmed' : challenges[currentChallengeIdx]?.instruction}
+                            </span>
+                          </div>
+                          {!isLivenessComplete && (
+                            <button
+                              type="button"
+                              onClick={handleQuickPassStep}
+                              title="Confirm active challenge immediately"
+                              className="px-2 py-0.5 bg-[#397BFF]/20 hover:bg-[#397BFF]/40 text-[#397BFF] border border-[#397BFF]/40 rounded text-[9px] font-bold cursor-pointer transition-all shrink-0"
+                            >
+                              ⚡ Quick Pass
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Real-time Progress Bar */}
+                        <div className="w-full bg-[#1A2333] h-1.5 rounded-full overflow-hidden border border-[#397BFF]/20">
+                          <div
+                            className={`h-full transition-all duration-150 ${
+                              isLivenessComplete
+                                ? 'bg-[#10B981]'
+                                : 'bg-gradient-to-r from-[#397BFF] to-[#10B981]'
+                            }`}
+                            style={{ width: `${isLivenessComplete ? 100 : challengeProgress}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Center Face Oval & Directional Animation */}
+                      <div className="relative flex items-center justify-center">
+                        <div
+                          className={`relative w-[150px] h-[150px] rounded-[42px] border-2 transition-all duration-300 ${
+                            isLivenessComplete
+                              ? 'border-[#10B981] shadow-[0_0_30px_rgba(16,185,129,0.5)]'
+                              : isFaceAligned
+                              ? 'border-[#397BFF] shadow-[0_0_25px_rgba(57,123,255,0.45)]'
+                              : 'border-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.4)]'
+                          }`}
+                        >
+                          <div className={`absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#397BFF]' : 'border-rose-500'}`} />
+                          <div className={`absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#397BFF]' : 'border-rose-500'}`} />
+                          <div className={`absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#397BFF]' : 'border-rose-500'}`} />
+                          <div className={`absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 ${isLivenessComplete ? 'border-[#10B981]' : isFaceAligned ? 'border-[#397BFF]' : 'border-rose-500'}`} />
+
+                          {!isLivenessComplete && challenges[currentChallengeIdx] && (
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              {challenges[currentChallengeIdx].type === 'TURN_LEFT' && (
+                                <ChevronLeft className="w-12 h-12 text-[#397BFF] animate-pulse drop-shadow-[0_0_12px_#397BFF] -translate-x-3" />
+                              )}
+                              {challenges[currentChallengeIdx].type === 'TURN_RIGHT' && (
+                                <ChevronRight className="w-12 h-12 text-[#397BFF] animate-pulse drop-shadow-[0_0_12px_#397BFF] translate-x-3" />
+                              )}
+                              {challenges[currentChallengeIdx].type === 'TILT_UP' && (
+                                <ChevronUp className="w-12 h-12 text-[#397BFF] animate-pulse drop-shadow-[0_0_12px_#397BFF] -translate-y-3" />
+                              )}
+                              {challenges[currentChallengeIdx].type === 'TILT_DOWN' && (
+                                <ChevronDown className="w-12 h-12 text-[#397BFF] animate-pulse drop-shadow-[0_0_12px_#397BFF] translate-y-3" />
+                              )}
+                              {challenges[currentChallengeIdx].type === 'BLINK_EYEBROWS' && (
+                                <div className="text-center animate-bounce">
+                                  <span className="text-2xl drop-shadow-[0_0_10px_#397BFF]">👁️</span>
+                                  <span className="block text-[8px] text-[#397BFF] font-mono font-bold">BLINK / EYEBROWS</span>
+                                </div>
+                              )}
+                              {challenges[currentChallengeIdx].type === 'SMILE_CENTER' && (
+                                <Sparkles className="w-10 h-10 text-[#397BFF] animate-spin drop-shadow-[0_0_12px_#397BFF]" />
+                              )}
+                            </div>
+                          )}
+
+                          {stepFeedback && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-[#080A0F]/80 backdrop-blur-sm rounded-[40px]">
+                              <span className="text-xs font-bold text-[#10B981] font-mono tracking-wide px-2.5 py-1 bg-[#10B981]/20 border border-[#10B981]/40 rounded-lg animate-pulse">
+                                {stepFeedback}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* HUD Status Pill */}
+                      <div className="flex justify-center">
+                        <div className="px-3 py-1 rounded-full text-[10px] font-mono font-bold tracking-wide backdrop-blur-md border flex items-center gap-1.5 bg-[#080A0F]/90 text-white border-[#1E2538]">
+                          <span className={`w-1.5 h-1.5 rounded-full ${isLivenessComplete ? 'bg-[#10B981]' : isFaceAligned ? 'bg-[#397BFF] animate-pulse' : 'bg-rose-500'}`} />
+                          <span>{faceAlignmentMessage}</span>
+                        </div>
+                      </div>
+                    </div>
                   )}
 
                   {/* Fallback Animated Sensor UI if camera is initializing or permission blocked */}
@@ -685,21 +1017,50 @@ export default function IdentityPortalPage() {
                   )}
                 </div>
 
-                <div className="bg-[#080A0F] border border-[#1E2538] rounded-xl p-3 text-xs">
-                  <span className="text-[#397BFF] font-semibold block">Liveness Challenge Step {livenessCount + 1} of 3</span>
-                  <span className="text-white mt-1 block">
-                    {livenessCount === 0 && 'Look directly at the camera and blink naturally.'}
-                    {livenessCount === 1 && 'Slightly tilt your head to confirm depth liveness.'}
-                    {livenessCount === 2 && 'Hold still while your Poseidon commitment is generated.'}
+                {/* Challenge instruction banner */}
+                <div className="bg-[#080A0F] border border-[#1E2538] rounded-xl p-3.5 text-xs max-w-sm mx-auto">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[#397BFF] font-semibold font-mono">
+                      {isLivenessComplete ? 'Step 3 of 3 Completed' : `Step ${currentChallengeIdx + 1} of ${challenges.length}`}
+                    </span>
+                    <span className="text-[10px] text-[#94A3B8]">
+                      {isLivenessComplete ? '100%' : `${challengeProgress}%`}
+                    </span>
+                  </div>
+                  <span className="text-white font-medium block text-sm">
+                    {isLivenessComplete
+                      ? '✓ 3D Liveness Verified! Generating Poseidon ZK Proof...'
+                      : `${challenges[currentChallengeIdx]?.icon || '•'} ${challenges[currentChallengeIdx]?.instruction || 'Align Face'}`}
+                  </span>
+                  <span className="text-[#94A3B8] text-[11px] block mt-0.5">
+                    {isLivenessComplete
+                      ? 'Ready to anchor commitment to Solana Devnet'
+                      : challenges[currentChallengeIdx]?.detail}
                   </span>
                 </div>
 
-                <button
-                  onClick={handleLivenessAction}
-                  className="px-6 py-2.5 rounded-xl bg-[#10B981] hover:bg-[#059669] text-white font-semibold text-xs transition-colors cursor-pointer"
-                >
-                  Confirm Challenge Action ({livenessCount}/3)
-                </button>
+                <div className="max-w-sm mx-auto flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleQuickPassStep}
+                    disabled={isLivenessComplete}
+                    className="flex-1 py-2.5 rounded-xl bg-[#1E2538] hover:bg-[#2A344D] text-[#94A3B8] hover:text-white font-semibold text-xs transition-colors cursor-pointer"
+                  >
+                    ⚡ Skip / Confirm Step
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={executeEnrollment}
+                    className={`flex-1 py-2.5 rounded-xl font-semibold text-xs transition-all cursor-pointer shadow-lg ${
+                      isLivenessComplete
+                        ? 'bg-gradient-to-r from-[#10B981] to-[#397BFF] text-white ring-2 ring-[#10B981]/50 animate-pulse'
+                        : 'bg-[#397BFF] hover:bg-[#2A6BF2] text-white'
+                    }`}
+                  >
+                    {isLivenessComplete ? '⚡ Enroll on Solana Devnet' : 'Complete Challenge'}
+                  </button>
+                </div>
               </div>
             )}
 

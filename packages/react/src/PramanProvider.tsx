@@ -62,9 +62,43 @@ export const PramanProvider: React.FC<PramanProviderProps> = ({
     };
   };
 
-  // Initialize cached session on mount
+  // Initialize cached session on mount & handle popup callback routing
   useEffect(() => {
     try {
+      // If current window is an OAuth popup callback, relay code and close
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const isPopup = params.get('popup') === '1' || window.name === 'praman_auth_popup' || !!window.opener;
+
+        if (code && isPopup) {
+          const state = params.get('state') || '';
+          const payload = { type: 'PRAMAN_AUTH_SUCCESS', code, state };
+
+          // Channel 1: LocalStorage synchronization
+          localStorage.setItem('praman_auth_callback', JSON.stringify({ code, state, ts: Date.now() }));
+
+          // Channel 2: BroadcastChannel
+          if ('BroadcastChannel' in window) {
+            try {
+              const bc = new BroadcastChannel('praman_auth_channel');
+              bc.postMessage(payload);
+              bc.close();
+            } catch (e) {}
+          }
+
+          // Channel 3: Direct window.opener postMessage
+          if (window.opener && !window.opener.closed) {
+            window.opener.postMessage(payload, '*');
+          }
+
+          setTimeout(() => {
+            try { window.close(); } catch (e) {}
+          }, 300);
+          return;
+        }
+      }
+
       const cached = client.getStoredUser();
       if (cached) {
         setUser(normalizeUser(cached));

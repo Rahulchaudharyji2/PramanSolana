@@ -157,25 +157,38 @@ export class PramanClient {
     }
 
     return new Promise((resolve, reject) => {
-      const handleMessage = async (event: MessageEvent) => {
-        if (!event.data) return;
+      let isResolved = false;
 
-        if (event.data.type === 'PRAMAN_AUTH_FAILED') {
-          window.removeEventListener('message', handleMessage);
-          clearInterval(timer);
-          const errCode = event.data.error?.code || 'CONSENT_DENIED';
-          const errMsg = event.data.error?.message || 'Authentication cancelled by user.';
-          reject(new Error(`[PramanSDK] ${errCode}: ${errMsg}`));
-          return;
-        }
+      let bc: BroadcastChannel | null = null;
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        try {
+          bc = new BroadcastChannel('praman_auth_channel');
+          bc.onmessage = async (event: MessageEvent) => {
+            if (event.data?.type === 'PRAMAN_AUTH_SUCCESS' && event.data.code) {
+              await finishSuccess(event.data.code);
+            }
+          };
+        } catch (e) {}
+      }
 
-        if (event.data.type !== 'PRAMAN_AUTH_SUCCESS') return;
-
-        window.removeEventListener('message', handleMessage);
+      const cleanup = () => {
         clearInterval(timer);
+        window.removeEventListener('message', handleMessage);
+        window.removeEventListener('storage', handleStorage);
+        if (bc) {
+          try { bc.close(); } catch (e) {}
+        }
+      };
+
+      const finishSuccess = async (code: string) => {
+        if (isResolved) return;
+        isResolved = true;
+        cleanup();
+        try {
+          if (!popup.closed) popup.close();
+        } catch (e) {}
 
         try {
-          const { code } = event.data;
           const tokenRes = await this.exchangeCode({
             code,
             state,
@@ -187,17 +200,79 @@ export class PramanClient {
         }
       };
 
+      const handleStorage = async (e: StorageEvent) => {
+        if (e.key === 'praman_auth_callback' && e.newValue) {
+          try {
+            const data = JSON.parse(e.newValue);
+            if (data.code) {
+              await finishSuccess(data.code);
+            }
+          } catch (err) {}
+        }
+      };
+
+      window.addEventListener('storage', handleStorage);
+
+      const handleMessage = async (event: MessageEvent) => {
+        if (!event.data) return;
+
+        if (event.data.type === 'PRAMAN_AUTH_FAILED') {
+          if (isResolved) return;
+          isResolved = true;
+          cleanup();
+          const errCode = event.data.error?.code || 'CONSENT_DENIED';
+          const errMsg = event.data.error?.message || 'Authentication cancelled by user.';
+          reject(new Error(`[PramanSDK] ${errCode}: ${errMsg}`));
+          return;
+        }
+
+        if (event.data.type !== 'PRAMAN_AUTH_SUCCESS') return;
+        await finishSuccess(event.data.code);
+      };
+
       window.addEventListener('message', handleMessage);
 
       let closedGraceChecks = 0;
       const timer = setInterval(() => {
+        // Multi-channel check: 1. LocalStorage synchronization
+        const storedCb = this.storage.getItem('praman_auth_callback');
+        if (storedCb) {
+          try {
+            const parsed = JSON.parse(storedCb);
+            if (parsed.code) {
+              this.storage.removeItem('praman_auth_callback');
+              finishSuccess(parsed.code);
+              return;
+            }
+          } catch (e) {}
+        }
+
+        // Multi-channel check: 2. If popup redirected to same-origin redirect_uri
+        try {
+          if (!popup.closed && popup.location) {
+            const href = popup.location.href;
+            if (href && href.includes('code=')) {
+              const urlObj = new URL(href);
+              const authCode = urlObj.searchParams.get('code');
+              if (authCode) {
+                finishSuccess(authCode);
+                return;
+              }
+            }
+          }
+        } catch (e) {
+          // Cross-origin access while popup on localhost:3000 is safely ignored
+        }
+
         if (popup.closed) {
+          if (isResolved) return;
           closedGraceChecks++;
-          // Allow 4 checks (2.0 seconds) for any in-flight message exchange to resolve
-          if (closedGraceChecks >= 4) {
-            clearInterval(timer);
-            window.removeEventListener('message', handleMessage);
-            reject(new Error('[PramanSDK] USER_CANCELLED: Authentication was cancelled by user.'));
+          // Allow 8 checks (4.0 seconds) for in-flight message exchange to resolve
+          if (closedGraceChecks >= 8) {
+            cleanup();
+            if (!isResolved) {
+              reject(new Error('[PramanSDK] USER_CANCELLED: Authentication was cancelled by user.'));
+            }
           }
         }
       }, 500);
@@ -248,10 +323,13 @@ export class PramanClient {
     }
 
     this.storage.setItem('praman_access_token', data.accessToken);
-    // CRITICAL PRIVACY: The SDK does not automatically persist personal profile data to browser storage.
+    if (data.pairwiseUser) {
+      this.storage.setItem('praman_user_data', JSON.stringify(data.pairwiseUser));
+    }
     if (data.authResponse && data.authResponse.success) {
       this.activeSession = data.authResponse.session;
       this.lastAuthResponse = data.authResponse;
+      this.storage.setItem('praman_auth_response', JSON.stringify(data.authResponse));
     }
 
     return data;
@@ -552,6 +630,12 @@ export class PramanClient {
         permittedAttributes: {},
       };
     }
+    const stored = this.storage.getItem('praman_user_data');
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (e) {}
+    }
     return null;
   }
 
@@ -563,6 +647,7 @@ export class PramanClient {
     this.lastAuthResponse = null;
     this.storage.removeItem('praman_access_token');
     this.storage.removeItem('praman_user_data');
+    this.storage.removeItem('praman_auth_response');
   }
 
   public decodeIdToken(idToken: string): IdTokenClaims {
