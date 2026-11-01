@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Distributed Relational Database (YugabyteDB YSQL)
+  yugabyte:
+    image: yugabytedb/yugabyte:latest
+    container_name: praman-yugabytedb
+    command: [
+      "bin/yugabyted", "start",
+      "--daemon=false",
+      "--ui=true"
+    ]
+    ports:
+      - "5433:5433" # YSQL port (PostgreSQL wire-compatible)
+      - "7000:7000" # Master UI
+      - "9000:9000" # TServer UI
+      - "15433:15433" # yugabyted UI
+    volumes:
+      - yb_data:/root/var
+    healthcheck:
+      test: ["CMD", "bin/ysqlsh", "-h", "localhost", "-p", "5433", "-U", "yugabyte", "-c", "SELECT 1;"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Replay Nonce Guard
+  redis:
+    image: redis:7-alpine
+    container_name: praman-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Praman Core Backend REST API
+  api:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: praman-api
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - DATABASE_URL=postgresql://yugabyte:yugabyte@yugabyte:5433/praman_db?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - JWT_SIGNING_SECRET=praman_production_jwt_secret_2026
+      - VAULT_MASTER_KEY=praman_production_vault_master_key_2026
+      - SOLANA_RPC_ENDPOINT=https://api.devnet.solana.com
+    depends_on:
+      - yugabyte
+      - redis
+
+  # Praman Web Ecosystem (Landing, Dashboard, Identity, Docs, Demos)
+  web:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.web
+    container_name: praman-web
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:4000
+      - NEXT_PUBLIC_PRAMAN_CLIENT_ID=praman_client_demo_live
+    depends_on:
+      - api
+
+volumes:
+  yb_data:
+  redis_data:
+

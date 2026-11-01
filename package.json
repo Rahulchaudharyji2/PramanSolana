@@ -1,0 +1,24 @@
+{
+  "name": "praman-network",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Praman Network - Privacy-Preserving Identity & Authentication Infrastructure",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:api": "turbo run dev --filter=@praman-network/api",
+    "dev:web": "turbo run dev --filter=@praman-network/web",
+    "dev:dashboard": "turbo run dev --filter=@praman-network/dashboard",
+    "dev:identity": "turbo run dev --filter=@praman-network/identity-portal",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json}\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "prettier": "^3.5.1",
+    "turbo": "^2.4.4",
+    "typescript": "^5.7.3"
+  },
+  "packageManager": "pnpm@11.0.8"
+}

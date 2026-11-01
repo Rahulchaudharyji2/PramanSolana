@@ -1,0 +1,49 @@
+name: CI Quality & Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 11.0.8
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Core Packages
+        run: pnpm -r --filter="./packages/*" run build
+
+      - name: Run Cryptographic & ZK Test Suite
+        run: |
+          node -e "
+          import('./packages/crypto/dist/index.js').then(async (crypto) => {
+            const dek = crypto.deriveKey('master_key', 'test');
+            const enc = crypto.encryptAttribute('Alice', dek);
+            if (crypto.decryptAttribute(enc, dek) !== 'Alice') throw new Error('AES fail');
+            const zk = await import('./packages/zk/dist/index.js');
+            const results = await zk.runZKNegativeTestHarness();
+            const failed = results.filter(r => !r.passed);
+            if (failed.length > 0) throw new Error('ZK suite failed: ' + JSON.stringify(failed));
+            console.log('All CI crypto and ZK tests passed!');
+          });"
+
+      - name: Build API Backend
+        run: pnpm --filter="@praman-network/api" run build
+

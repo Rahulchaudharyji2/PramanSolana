@@ -1,0 +1,25 @@
+{
+  "name": "@praman-network/crypto",
+  "version": "1.0.0",
+  "description": "Cryptographic utilities for Praman Network: AES-256-GCM Vault, Pairwise Pseudonyms, Poseidon commitments, and PKCE",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@praman-network/types": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

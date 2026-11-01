@@ -1,0 +1,32 @@
+{
+  "name": "@praman-network/sdk",
+  "version": "3.0.3",
+  "description": "Official TypeScript SDK for Praman Network: Privacy-Preserving Biometric Authentication",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@praman-network/types": "^3.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

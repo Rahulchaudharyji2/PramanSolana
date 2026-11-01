@@ -1,0 +1,61 @@
+name: praman-network
+region: nyc
+services:
+  - name: praman-api
+    github:
+      branch: main
+      deploy_on_push: true
+      repo: praman-network/praman-core
+    dockerfilePath: infrastructure/docker/Dockerfile.api
+    http_port: 4000
+    instance_count: 2
+    instance_size_slug: basic-m
+    routes:
+      - path: /api
+    envs:
+      - key: PORT
+        value: "4000"
+      - key: NODE_ENV
+        value: "production"
+      - key: DATABASE_URL
+        value: ${praman-db.DATABASE_URL}
+      - key: REDIS_URL
+        value: ${praman-redis.REDIS_URL}
+      - key: SOLANA_RPC_ENDPOINT
+        value: "https://api.devnet.solana.com"
+      - key: JWT_SIGNING_SECRET
+        type: SECRET
+      - key: VAULT_MASTER_KEY
+        type: SECRET
+    health_check:
+      http_path: /api/v1/health
+      initial_delay_seconds: 15
+      period_seconds: 10
+
+  - name: praman-web
+    github:
+      branch: main
+      deploy_on_push: true
+      repo: praman-network/praman-core
+    dockerfilePath: infrastructure/docker/Dockerfile.web
+    http_port: 3000
+    instance_count: 2
+    instance_size_slug: basic-m
+    routes:
+      - path: /
+    envs:
+      - key: NEXT_PUBLIC_API_URL
+        value: "https://api.praman.network"
+      - key: NEXT_PUBLIC_PRAMAN_CLIENT_ID
+        value: "praman_client_demo_live"
+
+databases:
+  - name: praman-db
+    engine: PG
+    version: "16"
+    production: true
+    cluster_name: praman-yugabyte-pg
+  - name: praman-redis
+    engine: REDIS
+    production: true
+

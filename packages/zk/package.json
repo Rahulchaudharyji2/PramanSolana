@@ -1,0 +1,26 @@
+{
+  "name": "@praman-network/zk",
+  "version": "1.0.0",
+  "description": "Zero-Knowledge Biometric Similarity Prover & Verifier Adapter for Praman Network",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@praman-network/types": "workspace:*",
+    "@praman-network/crypto": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
