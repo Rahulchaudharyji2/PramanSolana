@@ -269,11 +269,11 @@ importers:
   packages/react:
     dependencies:
       '@praman-network/sdk':
-        specifier: ^3.0.3
-        version: 3.0.3
+        specifier: workspace:*
+        version: link:../sdk
       '@praman-network/types':
-        specifier: ^3.0.0
-        version: 3.0.0
+        specifier: workspace:*
+        version: link:../types
     devDependencies:
       '@types/react':
         specifier: ^19.0.8
@@ -294,8 +294,8 @@ importers:
   packages/sdk:
     dependencies:
       '@praman-network/types':
-        specifier: ^3.0.0
-        version: 3.0.0
+        specifier: workspace:*
+        version: link:../types
     devDependencies:
       typescript:
         specifier: ^5.7.3
@@ -1181,12 +1181,6 @@ packages:
 
   '@oxc-project/types@0.156.0':
     resolution: {integrity: sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==}
-
-  '@praman-network/sdk@3.0.3':
-    resolution: {integrity: sha512-p41jdUv7r7xgp0OJcKET8U+OKzejJNBzt/r8Yyrb+cK5ve1u6vl5GIEpDqOPc26StX/D5S6O0Zc7n1hv6Q+g+Q==}
-
-  '@praman-network/types@3.0.0':
-    resolution: {integrity: sha512-cxJ5ZWOdSuAi5jBXTMt2l0uTMn5lgOfr6Fqi/kuYrKwWmukeTjHUNTqcvlrzcNZCf+PwKZapqfbZG3w2hHB4VA==}
 
   '@prisma/cli-engine@0.9.0':
     resolution: {integrity: sha512-M53Xx/KiPQ02iT8FXT2c9X+3fVgMVfWK/emf/tq+jRNFi7b0Ffwaeo1yz8XS4UKOza5DaKRwMs+K8U44z9corg==}
@@ -4177,12 +4171,6 @@ snapshots:
   '@oxc-project/types@0.146.0': {}
 
   '@oxc-project/types@0.156.0': {}
-
-  '@praman-network/sdk@3.0.3':
-    dependencies:
-      '@praman-network/types': 3.0.0
-
-  '@praman-network/types@3.0.0': {}
 
   '@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.80.0)(magicast@0.5.5)':
     dependencies:

@@ -24,7 +24,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@praman-network/types": "^3.0.0"
+    "@praman-network/types": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
