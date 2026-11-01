@@ -4,7 +4,7 @@ services:
     name: praman-api
     runtime: node
     plan: free
-    buildCommand: pnpm install && npx turbo run build --filter=@praman-network/api...
+    buildCommand: npm install -g pnpm && pnpm install && npx turbo run build --filter=@praman-network/api...
     startCommand: node apps/api/dist/index.js
     envVars:
       - key: NODE_ENV
@@ -25,9 +25,8 @@ services:
     name: praman-web
     runtime: node
     plan: free
-    buildCommand: pnpm install && npx turbo run build --filter=@praman-network/web...
-    startCommand: pnpm --filter @praman-network/web start -p $PORT
+    buildCommand: npm install -g pnpm && pnpm install && npx turbo run build --filter=@praman-network/web...
+    startCommand: npx next start apps/web -p $PORT
     envVars:
       - key: NODE_ENV
         value: production
-
